@@ -1,0 +1,209 @@
+# -*- coding: utf-8 -*-
+"""
+競品輿情分析系統 - 指揮中心（research_orchestrator.py）
+完整流程：需求定義 → 產業掃描 → 競品雷達 → 關鍵字驗證 → 社群聲量 → 深度分析 → 報告產出
+版本：V2.2（重構：責任分離）
+"""
+
+import json
+import logging
+import os
+import sys
+from typing import List
+
+logger = logging.getLogger(__name__)
+
+
+def _setup_win_encoding() -> None:
+    """Windows 終端機 UTF-8 設定，只在 main() 入口呼叫一次。"""
+    if sys.platform != 'win32':
+        return
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass  # Python 3.6 以下無 reconfigure，靜默略過
+
+
+try:
+    from google import genai  # noqa: F401  — 確認套件已安裝
+except ImportError:
+    print("❌ 請先安裝 google-genai：pip install google-genai")
+    sys.exit(1)
+
+# 載入 config，讓 system.env 的 GEMINI_API_KEY 可被 os.getenv 讀到
+try:
+    import config  # noqa: F401
+except ImportError:
+    pass
+
+from orchestrator import ScopeCollector, AIAnalyzer, ScraperCoordinator, ReportPipeline
+from orchestrator._utils import _p
+
+
+class ResearchOrchestrator:
+    """完整市場調查流程總指揮，只負責串接各責任類別。"""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def run_full_pipeline(self) -> None:
+        """執行完整流程"""
+        _p("\n" + "🚀" * 30)
+        _p("完整市場調查流程啟動")
+        _p("🚀" * 30)
+
+        output_dir = None
+        try:
+            # ── Stage 0：需求定義 ─────────────────────────────────
+            scope, output_dir = ScopeCollector().collect()
+
+            ai = AIAnalyzer(api_key=self.api_key, output_dir=output_dir)
+
+            # ── Stage 1：產業掃描 ─────────────────────────────────
+            ai.scan_industry(industry=scope['industry'], service=scope['service'])
+
+            # ── Stage 2：競品雷達 ─────────────────────────────────
+            manual_list = (
+                scope.get('manual_competitors')
+                if scope.get('competitor_source') == 'manual'
+                else None
+            )
+            competitors_file = ai.find_competitors(
+                brand=scope['brand'],
+                service=scope['service'],
+                industry=scope['industry'],
+                audience=scope.get('audience', ''),
+                manual_competitors=manual_list,
+            )
+
+            # ── Stage 3：關鍵字驗證 ──────────────────────────────
+            competitor_names = self._load_competitor_names(competitors_file)
+            keywords_file = ai.validate_keywords(
+                brand=scope['brand'],
+                competitors=competitor_names,
+                industry=scope['industry'],
+                service=scope['service'],
+            )
+
+            # ── Stage 4：社群聲量 ────────────────────────────────
+            all_keywords = self._load_keywords(keywords_file, scope)
+            social_results, time_range_days, _ = ScraperCoordinator().run(
+                keywords=all_keywords,
+                kw_label=scope.get('service', ''),
+                industry=scope.get('industry'),
+                output_dir=output_dir,
+                brand=scope.get('brand', ''),
+                competitor_names=competitor_names,
+            )
+
+            # ── Stage 5：深度分析 ────────────────────────────────
+            analysis_file = ai.deep_analysis(
+                scope=scope,
+                competitors_file=competitors_file,
+                keywords_file=keywords_file,
+                social_results=social_results,
+                time_range_days=time_range_days,
+            )
+
+            # ── Stage 6：最終報告 ────────────────────────────────
+            project_files = {
+                'competitors_file': competitors_file,
+                'keywords_file':    keywords_file,
+                'analysis_report':  analysis_file,
+                'social_listening': social_results,
+            }
+            final_file = ReportPipeline().generate(
+                scope=scope,
+                output_dir=output_dir,
+                competitors_file=competitors_file,
+                keywords_file=keywords_file,
+                social_results=social_results,
+                time_range_days=time_range_days,
+                project_files=project_files,
+            )
+
+            _p("\n" + "=" * 60)
+            _p("🎉 完整市場調查流程完成！")
+            _p("=" * 60)
+            _p(f"\n📁 所有產出位於：{output_dir}")
+            _p(f"📄 最終報告：{final_file}")
+
+            try:
+                import webbrowser
+                webbrowser.open(f"file://{os.path.abspath(final_file)}")
+                _p("\n✅ 報告已自動開啟")
+            except Exception:
+                _p("\n💡 請手動開啟報告檔案")
+
+        except KeyboardInterrupt:
+            _p("\n\n⚠️ 使用者中斷執行")
+            if output_dir:
+                _p(f"已產出的檔案位於：{output_dir}")
+
+        except Exception as e:
+            import traceback
+            _p(f"\n\n❌ 執行失敗：{e}")
+            if output_dir:
+                _p(f"已產出的檔案位於：{output_dir}")
+            try:
+                traceback.print_exc()
+            except (ValueError, OSError):
+                pass
+
+    # ── 私有輔助 ────────────────────────────────────────────────
+
+    def _load_competitor_names(self, competitors_file: str) -> List[str]:
+        """讀取 competitors.json，回傳競品名稱清單。"""
+        try:
+            with open(competitors_file, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            comp_list = raw.get('competitors', raw) if isinstance(raw, dict) else raw
+            if not isinstance(comp_list, list):
+                return []
+            return [
+                c.get('competitor_name', c.get('name', ''))
+                for c in comp_list
+                if c.get('competitor_name') or c.get('name')
+            ]
+        except Exception:
+            return []
+
+    def _load_keywords(self, keywords_file: str, scope: dict) -> List[str]:
+        """讀取 confirmed_keywords.json，回傳展開後的關鍵字清單。"""
+        fallback = [scope.get('brand', ''), scope.get('service', '')]
+        try:
+            with open(keywords_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            kws: List[str] = []
+            kw_obj = data.get('keywords', data)
+            if isinstance(kw_obj, dict):
+                for kw_list in kw_obj.values():
+                    kws.extend(kw_list if isinstance(kw_list, list) else [])
+            return kws or fallback
+        except Exception:
+            return fallback
+
+
+def main():
+    """主程式入口"""
+    _setup_win_encoding()
+    try:
+        from config import Config
+        Config.setup_logging("research_orchestrator.log")
+        api_key = Config.GEMINI_API_KEY or os.getenv("GEMINI_API_KEY")
+    except ImportError:
+        api_key = os.getenv("GEMINI_API_KEY")
+
+    if not api_key:
+        print("⚠️ 找不到 GEMINI_API_KEY 環境變數")
+        api_key = input("請輸入你的 Gemini API 金鑰：").strip()
+        if not api_key:
+            print("❌ 未提供 API 金鑰，程式結束")
+            return
+
+    ResearchOrchestrator(api_key).run_full_pipeline()
+
+
+if __name__ == "__main__":
+    main()

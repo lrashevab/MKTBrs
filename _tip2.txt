@@ -1,0 +1,16 @@
+class="pptx-tooltip">
+      <b>下載後可匯入（文字完整可編輯）：</b>
+      <hr>
+      🎨 <b>Canva</b>：建立設計 → 匯入檔案 → 上傳 .pptx<br>
+      📊 <b>Google 簡報</b>：檔案 → 匯入投影片 → 上傳<br>
+      📝 <b>PowerPoint</b>：直接開啟即可編輯<br>
+      <hr>
+      ⚠️ 上傳 PDF 文字會變圖片；用 .pptx 才能自由修改內容
+    </div>
+  </div>
+</div>
+<div class="container">
+
+<div class="report-header">
+  <h1>競品分析報告：東區德學院</h1>
+  <div class="subtitle">新品上市 ｜ 兩性感情約會 產業 ｜ 核心產品／服務

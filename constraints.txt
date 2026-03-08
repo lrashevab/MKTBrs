@@ -1,0 +1,19 @@
+# 依賴鎖定（可選）：用於重現相同環境
+# 使用方式：pip install -r requirements.txt -c constraints.txt
+#
+# 產生方式：在專案虛擬環境中執行
+#   pip freeze | findstr /I "google-genai python-dotenv playwright requests beautifulsoup4 feedparser pandas numpy jieba markdown tqdm"
+# 將輸出貼至此檔，並保留上述套件行即可。
+#
+# 以下為與 requirements.txt 對齊之最低版本，若未執行 pip freeze 可暫時註解掉下方改用上方說明產生。
+# google-genai>=0.2.0
+# python-dotenv>=1.0.0
+# playwright>=1.40.0
+# requests>=2.31.0
+# beautifulsoup4>=4.12.0
+# feedparser>=6.0.10
+# pandas>=2.0.0
+# numpy>=1.24.0
+# jieba>=0.42.1
+# markdown>=3.5.0
+# tqdm>=4.66.0

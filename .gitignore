@@ -1,0 +1,14 @@
+# Threads 爬蟲：瀏覽器登入設定檔（內含 Cookie，請勿提交）
+threads_browser_profile/
+
+# 環境與金鑰
+system.env
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
