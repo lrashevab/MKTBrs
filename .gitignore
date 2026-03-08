@@ -9,6 +9,14 @@ system.env
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 .venv/
 venv/
 *.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

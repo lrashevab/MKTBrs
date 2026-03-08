@@ -18,8 +18,9 @@ except ImportError:
 class Config:
     """系統配置類別"""
 
-    # === API 金鑰 ===
+    # === API 金鑰（從環境變數讀取）===
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY", "")  # YouTube Data API（選填）
 
     # === 系統路徑 ===
     BASE_DIR = Path(__file__).parent
@@ -35,12 +36,12 @@ class Config:
     DCARD_TOP_COMMENTS = 20       # 每篇 Dcard 文章抓取的熱門留言數
     PTT_MAX_ARTICLES = 300
     PTT_CONTENT_FETCH_LIMIT = 50  # PTT 按互動排序後，前 N 篇完整抓取內文+推文
-    REQUEST_TIMEOUT = 30
-    RETRY_TIMES = 3
+    REQUEST_TIMEOUT = 45          # P0 增加到 45 秒
+    RETRY_TIMES = 5                # P0 增加到 5 次重試
 
     # === 速率限制（秒），集中管理便於合規與調校 ===
-    DCARD_DELAY_MIN = 4.0
-    DCARD_DELAY_MAX = 6.0
+    DCARD_DELAY_MIN = 5.0          # P0 增加延遲
+    DCARD_DELAY_MAX = 8.0          # P0 增加延遲
     PTT_DELAY_BETWEEN_BOARDS = 2.0
     PTT_DELAY_BETWEEN_PAGES = 1.0
     PTT_DELAY_ARTICLE = 0.8

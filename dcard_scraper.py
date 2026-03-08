@@ -5,6 +5,7 @@ Dcard 輿情分析系統 - 技術總監版
 - 時間區間選擇、關鍵字發散
 - 報表含內文、每篇關鍵字、熱門留言(20則)
 - 跨產業四維度輿情（產品技術觀感/情緒焦慮/商業消費爭議/期待正向）
+- P0 修復：User-Agent 輪換、指數退避重試、模擬真實瀏覽器行為
 """
 
 import sys
@@ -17,11 +18,30 @@ import re
 import time
 from datetime import datetime, timedelta
 from urllib.parse import quote
+from typing import Optional, List
 
 from playwright.sync_api import sync_playwright
 from output_utils import _safe_print
 
 logger = logging.getLogger(__name__)
+
+# === P0 新增：User-Agent 輪換池 ===
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/122.0.0.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+]
+
+# === P0 新增：反爬蟲配置 ===
+RETRY_MAX = 5
+RETRY_BASE_DELAY = 2.0  # 指數退避基準 delay
+REQUEST_TIMEOUT = 45000  # 45 秒
+BROWSER_LAUNCH_TIMEOUT = 60000  # 60 秒
 
 try:
     import jieba
@@ -54,6 +74,22 @@ TOP_COMMENTS_COUNT = 20
 
 # 是否跳過內文抓取（內文常被 Dcard 阻擋，設 True 可穩定執行）
 SKIP_CONTENT = False
+
+# === P0 新增：指數退避函式 ===
+def get_retry_delay(attempt: int, base_delay: float = RETRY_BASE_DELAY) -> float:
+    """計算指數退避延遲時間，加入隨機 jitter"""
+    delay = base_delay * (2 ** attempt)
+    jitter = random.uniform(0, 1)  # 0-1 秒隨機 jitter
+    return delay + jitter
+
+# === P0 新增：隨機 User-Agent ===
+def get_random_user_agent() -> str:
+    return random.choice(USER_AGENTS)
+
+# === P0 新增：隨機延遲（模擬人類行為）===
+def random_human_delay(min_sec: float = 0.5, max_sec: float = 1.5) -> float:
+    """返回隨機延遲時間，模擬人類操作"""
+    return random.uniform(min_sec, max_sec)
 
 # --- 輔助函式 ---
 def _parse_article_date(date_str):
@@ -212,71 +248,104 @@ EXTRACT_ARTICLE_JS = """
 """
 
 
-def _fetch_article_retry(page, url, max_retries=2):
-    """帶重試的內文抓取"""
+def _fetch_article_retry(page, url, max_retries=RETRY_MAX):
+    """P0 修復：帶指數退避重試的內文抓取"""
     for attempt in range(max_retries + 1):
         try:
             page.set_default_timeout(25000)
             page.goto(url, wait_until="load")
             time.sleep(random.uniform(2.0, 3.0))
+            
+            # P0 新增：年齡驗證處理
             age_btn = page.query_selector('button:has-text("我已滿 18 歲")')
             if age_btn:
                 age_btn.click()
                 time.sleep(1.5)
+            
+            # P0 新增：更真實的滾動行為（隨機速度和停留時間）
             page.wait_for_selector("article", state="visible", timeout=12000)
             for _ in range(8):
-                page.evaluate("window.scrollBy(0, 1200)")
-                time.sleep(random.uniform(1.0, 1.5))
+                # 隨機滾動距離（400-1500），模擬人類
+                scroll_distance = random.randint(400, 1500)
+                page.evaluate(f"window.scrollBy(0, {scroll_distance})")
+                # 隨機停留時間（0.8-2.0 秒）
+                time.sleep(random.uniform(0.8, 2.0))
+            
             result = page.evaluate(EXTRACT_ARTICLE_JS)
             content = (result.get("content") or "").strip()
             comments = result.get("comments") or []
             return content, comments[:TOP_COMMENTS_COUNT]
         except Exception as e:
             if attempt < max_retries:
-                time.sleep(random.uniform(3, 5))
+                delay = get_retry_delay(attempt)
+                _safe_print(f"      [!] 內文抓取失敗，{delay:.1f}秒後重試 ({attempt+1}/{max_retries})...")
+                time.sleep(delay)
             else:
                 _safe_print(f"      [!] 頁面讀取失敗，略過：{str(e)[:50]}")
                 return "", []
     return "", []
 
 
-def scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days=99999):
+def scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days=99999, max_retries=RETRY_MAX):
+    """P0 修復：加入指數退避重試機制"""
     total_added = 0
 
     for kw in keywords:
         url = f"{SEARCH_BASE}?query={quote(kw)}"
         _safe_print(f"\n[*] 搜尋關鍵字：{kw}")
-        try:
-            page.goto(url, wait_until="load", timeout=30000)
-            time.sleep(5.0)  # Dcard 是 React SPA，需要足夠時間渲染初始卡片
-
-            # 等待第一篇文章出現（最多再等 10 秒）
+        
+        # P0 新增：搜尋頁面載入重試機制
+        search_loaded = False
+        for attempt in range(max_retries + 1):
             try:
-                page.wait_for_selector('a[href*="/f/"][href*="/p/"]', timeout=10000)
-            except Exception:
-                _safe_print(f"    [!] {kw} 搜尋頁未載入文章，可能無結果或被封鎖，略過")
-                continue
-
-            # 人類模式漸進式滾動：每次往下滑一小段，等待新卡片載入
-            prev_count = 0
-            no_new_rounds = 0
-            for scroll_round in range(30):  # 最多 30 輪，約可載入 200+ 篇
-                # 每輪分 6 小步滾動（模擬真人往下拉）
-                for _ in range(6):
-                    page.evaluate("window.scrollBy(0, 500)")
-                    time.sleep(random.uniform(0.4, 0.7))
-                time.sleep(random.uniform(2.0, 2.8))  # 等待 Dcard 載入新卡片
-
-                current_count = len(page.locator('a[href*="/f/"][href*="/p/"]').all())
-                if current_count == prev_count:
-                    no_new_rounds += 1
-                    if no_new_rounds >= 3:  # 連續 3 輪都沒有新文章，停止
-                        _safe_print(f"    [*] 已到底部，共載入 {current_count} 篇卡片")
-                        break
+                page.goto(url, wait_until="load", timeout=30000)
+                time.sleep(random.uniform(4.0, 6.0))  # P0 增加等待時間
+                
+                # 等待第一篇文章出現（最多再等 15 秒）
+                try:
+                    page.wait_for_selector('a[href*="/f/"][href*="/p/"]', timeout=15000)
+                    search_loaded = True
+                    break
+                except Exception:
+                    _safe_print(f"    [!] {kw} 搜尋頁未載入文章，重試中... ({attempt+1}/{max_retries})")
+                    if attempt < max_retries:
+                        delay = get_retry_delay(attempt, base_delay=3.0)
+                        time.sleep(delay)
+                    continue
+            except Exception as e:
+                if attempt < max_retries:
+                    delay = get_retry_delay(attempt, base_delay=3.0)
+                    _safe_print(f"    [!] 頁面載入失敗，{delay:.1f}秒後重試 ({attempt+1}/{max_retries})...")
+                    time.sleep(delay)
                 else:
-                    no_new_rounds = 0
-                    _safe_print(f"    載入中... 目前 {current_count} 篇")
-                prev_count = current_count
+                    _safe_print(f"    [!] {kw} 搜尋頁載入多次失敗，略過")
+                    continue
+        
+        if not search_loaded:
+            continue
+
+        # P0 改進：人類模式漸進式滾動
+        prev_count = 0
+        no_new_rounds = 0
+        for scroll_round in range(35):  # P0 增加滾動次數限制
+            # 每輪分 4-8 小步滾動（隨機，模擬人類）
+            steps = random.randint(4, 8)
+            for _ in range(steps):
+                scroll_px = random.randint(300, 700)  # 隨機滾動距離
+                page.evaluate(f"window.scrollBy(0, {scroll_px})")
+                time.sleep(random.uniform(0.3, 0.8))  # 隨機停留
+            time.sleep(random.uniform(1.5, 3.0))  # 等待 Dcard 載入新卡片
+
+            current_count = len(page.locator('a[href*="/f/"][href*="/p/"]').all())
+            if current_count == prev_count:
+                no_new_rounds += 1
+                if no_new_rounds >= 4:  # P0 增加到 4 輪
+                    _safe_print(f"    [*] 已到底部，共載入 {current_count} 篇卡片")
+                    break
+            else:
+                no_new_rounds = 0
+                _safe_print(f"    載入中... 目前 {current_count} 篇")
+            prev_count = current_count
 
             links = page.locator('a[href*="/f/"][href*="/p/"]').all()
             items = []
@@ -432,7 +501,7 @@ def run_dcard_scrape(
     keyword_label=None,
     industry=None,
     headless=True,
-    browser_launch_timeout=30,
+    browser_launch_timeout=60,  # P0 增加到 60 秒
 ):
     """
     供流程整合呼叫：執行 Dcard 搜尋並產出報表。
@@ -450,19 +519,50 @@ def run_dcard_scrape(
     def _run():
         try:
             with sync_playwright() as p:
+                # P0 修復：使用隨機 User-Agent
+                random_ua = get_random_user_agent()
                 browser = p.chromium.launch(
                     headless=headless,
                     timeout=browser_launch_timeout * 1000,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',  # 隱藏自動化特徵
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                    ]
                 )
+                # P0 新增：更真實的瀏覽器上下文
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/121.0.0.0 Safari/537.36",
-                    viewport={"width": 1366, "height": 768},
+                    user_agent=random_ua,
+                    viewport={"width": random.choice([1366, 1440, 1920]), "height": random.choice([768, 900, 1080])},
+                    locale="zh-TW",
+                    timezone_id="Asia/Taipei",
+                    permissions=["geolocation"],
+                    extra_http_headers={
+                        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Referer": "https://www.dcard.tw/",
+                    }
                 )
+                
+                # P0 新增：注入腳本隱藏自動化特徵
                 page = context.new_page()
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['zh-TW', 'zh', 'en']
+                    });
+                """)
+                
                 all_results = []
                 seen_hrefs = set()
                 try:
-                    scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days)
+                    # P0 修復：傳入 max_retries
+                    scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days, max_retries=RETRY_MAX)
                     if all_results:
                         run_analysis_and_report(all_results, label, output_dir=out_dir, industry=industry)
                     else:

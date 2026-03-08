@@ -1,0 +1,12 @@
+{
+    "positive": [
+        "超讚", "超好用", "大推", "真心推薦", "回購N次",
+        "CP值破表", "便宜又好用", "物超所值", "質感超好",
+        "must buy", "god tier", "life changing"
+    ],
+    "negative": [
+        "雷包", "地雷中的地雷", "不如不買", "浪費錢",
+        "品質太差", "客服超爛", "完全不想再買", "被坑",
+        "scam alert", "avoid this", "total waste"
+    ]
+}
