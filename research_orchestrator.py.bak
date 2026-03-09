@@ -49,14 +49,9 @@ class ResearchOrchestrator:
 
     def run_full_pipeline(self) -> None:
         """執行完整流程"""
-        _p("\n" + "═" * 65)
-        _p("║" + " " * 20 + "🚀 MKTBrs 完整市場調查流程 🚀" + " " * 20 + "║")
-        _p("║" + " " * 15 + "Six-Stage Market Intelligence Pipeline" + " " * 15 + "║")
-        _p("═" * 65)
-        _p("\n📡 系統初始化完成")
-        _p("✅ AI 引擎連線正常")
-        _p("🎯 載入行銷專家分析框架")
-        _p("\n" + "─" * 65)
+        _p("\n" + "🚀" * 30)
+        _p("完整市場調查流程啟動")
+        _p("🚀" * 30)
 
         output_dir = None
         try:
@@ -128,20 +123,11 @@ class ResearchOrchestrator:
                 project_files=project_files,
             )
 
-            _p("\n" + "═" * 65)
-            _p("║" + " " * 22 + "✅ 市場調查完成！" + " " * 22 + "║")
-            _p("═" * 65)
-            _p("\n📊 產出摘要：")
-            _p(f"   📁 輸出資料夾：{output_dir}")
-            _p(f"   📄 最終報告：{final_file}")
-            _p(f"   📈 分析階段：6 個完整階段")
-            _p(f"   🎯 競品數量：{len(self._load_competitor_names(competitors_file)) if competitors_file else 0} 個")
-            _p("\n🎯 行銷洞察：")
-            _p("   • 完整市場定位分析")
-            _p("   • 競品深度對比")
-            _p("   • 輿情情緒分析")
-            _p("   • 具體行動建議")
-            _p("\n" + "─" * 65)
+            _p("\n" + "=" * 60)
+            _p("🎉 完整市場調查流程完成！")
+            _p("=" * 60)
+            _p(f"\n📁 所有產出位於：{output_dir}")
+            _p(f"📄 最終報告：{final_file}")
 
             try:
                 import webbrowser

@@ -1,6 +1,28 @@
-# 競品輿情分析系統
+# 🎯 MKTBrs - 競品輿情分析系統（行銷專家版）
+
+**AI-Powered Competitive Intelligence Platform**
 
 每次進來看這頁就能快速知道怎麼用。
+
+---
+
+## 🚀 新功能亮點（v2.0 行銷專家版）
+
+### 🎯 行銷專家分析框架
+- **八大維度品牌分析**：市場狀態、定位分析、產品矩陣、品牌優勢、受眾輪廓、市場潛力、SWOT分析、行銷通路
+- **競品深度分析**：價格帶、市場定位、優勢弱點、社群影響力、建議策略
+- **執行摘要**：一頁掌握關鍵洞察
+- **行動建議**：短期/中期/長期具體策略
+
+### 📊 專業報告輸出
+- **行銷專家版報告**：包含SWOT分析、行動建議、視覺化建議
+- **Fallout UI 風格**：復古終端機介面，提升使用體驗
+- **數據視覺化建議**：專業圖表類型推薦
+
+### ⚡ 效能優化
+- **強化重試機制**：指數退避重試，提升穩定性
+- **優化使用者體驗**：步驟化引導，清晰提示
+- **錯誤處理改善**：Fallout 風格錯誤訊息
 
 ---
 
@@ -133,6 +155,8 @@ python market_orchestrator.py
 | **keyword_validator.py** | 互動式關鍵字確認與儲存（被 research_orchestrator 呼叫） |
 | **ai_analyzer.py** | 讀 Dcard CSV 標題，用 AI 產出行銷分析報告 |
 | **report_generator.py** / **visualizer.py** | 報告生成與圖表（可依 campaign 資料夾產出） |
+| **marketing_report.py** | **新增**：行銷專家版報告生成器（包含SWOT分析、行動建議） |
+| **fallout_ui.py** | **新增**：Fallout 風格 UI 工具模組 |
 
 ---
 
@@ -150,4 +174,49 @@ python market_orchestrator.py
 **快速記憶**：  
 - 要**完整市調一次做完** → `python research_orchestrator.py`  
 - 只要**找競品** → `python auto_competitor_finder.py`  
-- 只要**Dcard / PTT / Threads** → `python dcard_scraper.py`、`python ptt_scraper.py`、`python threads_scraper.py`
+- 只要**Dcard / PTT / Threads** → `python dcard_scraper.py`、`python ptt_scraper.py`、`python threads_scraper.py`  
+- 要**行銷專家版報告** → `python marketing_report.py <campaign_dir>`  
+
+---
+
+## 🎨 Fallout UI 風格介面
+
+新版本加入了 Fallout 風格的復古終端機介面：
+
+### 特色功能：
+- **PIP-BOY 風格載入動畫**
+- **系統狀態顯示**：連線狀態、AI引擎、分析框架
+- **步驟化引導**：清晰的操作步驟提示
+- **錯誤訊息風格化**：⚠ SYSTEM MALFUNCTION 風格錯誤提示
+- **數據卡片顯示**：競品資訊以卡片形式呈現
+- **執行摘要**：一頁掌握關鍵洞察
+
+### 使用範例：
+```bash
+python auto_competitor_finder.py
+```
+將會看到 Fallout 風格的介面引導您完成競品分析。
+
+---
+
+## 📈 行銷專家分析框架
+
+### 八大維度品牌分析：
+1. **市場狀態**：聲量狀態與市場地位
+2. **定位分析**：市場定位與差異化
+3. **產品矩陣**：現有產品與價格區間
+4. **品牌優勢**：技術/價格/品牌/通路優勢
+5. **受眾輪廓**：樣貌、痛點、消費行為
+6. **市場潛力**：商機與成長空間
+7. **SWOT分析**：優勢/劣勢/機會/威脅
+8. **行銷通路**：通路與成效評估
+
+### 行動建議分層：
+- **短期策略** (1-3個月)：SEO優化、內容策略、定價調整
+- **中期策略** (3-6個月)：產品差異化、通路拓展、品牌建設
+- **長期策略** (6-12個月)：市場擴張、技術創新、生態系建設
+
+### 數據視覺化建議：
+- 競品雷達圖、市場定位矩陣、情緒趨勢圖
+- 關鍵字熱力圖、社群影響力圖、價格帶分布圖
+- SWOT分析圖、市場佔有率圖

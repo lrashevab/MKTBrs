@@ -13,6 +13,24 @@ from datetime import datetime
 def _safe_print(*args, **kwargs) -> None:
     """print() 的容錯包裝：sys.stdout 失效時（如 Playwright 關閉後）靜默略過。"""
     try:
+        # 嘗試導入 Fallout UI 風格
+        try:
+            from fallout_ui import FalloutUI
+            # 如果是狀態訊息，使用 Fallout 風格
+            if len(args) == 1 and isinstance(args[0], str):
+                msg = args[0]
+                if msg.startswith("✅") or "成功" in msg:
+                    FalloutUI.print_status('success', msg.replace("✅", "").strip())
+                    return
+                elif msg.startswith("⚠") or "警告" in msg:
+                    FalloutUI.print_status('warning', msg.replace("⚠", "").strip())
+                    return
+                elif msg.startswith("❌") or "錯誤" in msg:
+                    FalloutUI.print_status('error', msg.replace("❌", "").strip())
+                    return
+        except ImportError:
+            pass
+        
         print(*args, **kwargs)
     except (ValueError, OSError):
         pass

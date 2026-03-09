@@ -587,17 +587,9 @@ def run_dcard_scrape(
 
 # --- 主程式 ---
 def main():
-    _safe_print("\n" + "═" * 65)
-    _safe_print("║" + " " * 20 + "📊 Dcard 輿情分析系統" + " " * 20 + "║")
-    _safe_print("║" + " " * 15 + "Real-time Social Listening Platform" + " " * 15 + "║")
-    _safe_print("═" * 65)
-    _safe_print("\n📡 系統初始化中...")
-    time.sleep(0.5)
-    _safe_print("✅ Playwright 瀏覽器引擎就緒")
-    time.sleep(0.5)
-    _safe_print("🎯 載入情緒分析模型")
-    time.sleep(0.5)
-    _safe_print("\n" + "─" * 65)
+    _safe_print("=" * 55)
+    _safe_print("  Dcard 輿情分析系統（技術總監版）")
+    _safe_print("=" * 55)
 
     time_range_days = _choose_time_range()
 
