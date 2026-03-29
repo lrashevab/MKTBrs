@@ -1,0 +1,605 @@
+# -*- coding: utf-8 -*-
+"""
+Dcard 輿情分析系統 - 修正版
+修改重點：
+1. SKIP_CONTENT 預設改為 True
+2. Thread timeout 改為動態計算
+3. 修掉 except 孤立 bug
+4. 修掉重複抓文章的邏輯
+5. 加上清楚的完成回報
+"""
+
+import sys
+import os
+import csv
+import json
+import logging
+import random
+import re
+import time
+from datetime import datetime, timedelta
+from urllib.parse import quote
+from typing import Optional, List
+
+from playwright.sync_api import sync_playwright
+from output_utils import _safe_print
+
+logger = logging.getLogger(__name__)
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/122.0.0.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+]
+
+RETRY_MAX = 5
+RETRY_BASE_DELAY = 2.0
+REQUEST_TIMEOUT = 45000
+BROWSER_LAUNCH_TIMEOUT = 60000
+
+# ✅ 修改1：SKIP_CONTENT 預設改為 True
+# 原因：內文抓取是最容易被 Dcard 擋的步驟，標題+留言已足夠輿情分析
+SKIP_CONTENT = True
+
+try:
+    import jieba
+except ImportError:
+    jieba = None
+
+try:
+    from sentiment_config import NEGATIVE_WORDS, SENTIMENT_CATEGORIES, STOP_WORDS, get_negative_words
+except ImportError:
+    NEGATIVE_WORDS = ["雷", "爛", "騙", "貴", "沒效", "後悔", "盤子", "割韭菜", "退費", "話術", "假", "套路", "PUA"]
+    SENTIMENT_CATEGORIES = {
+        "產品技術觀感": {"keywords": ["話術", "套路", "罐頭", "背稿", "假", "PUA"], "polarity": "負面 (覺得假)"},
+        "情緒焦慮": {"keywords": ["尷尬", "自卑", "焦慮", "緊張", "沒自信"], "polarity": "中性/焦慮"},
+        "商業消費爭議": {"keywords": ["割韭菜", "盤子", "退費", "騙", "貴"], "polarity": "極度負面"},
+        "期待與正向需求": {"keywords": ["自然", "流暢", "幽默", "有效"], "polarity": "正面 (渴望)"},
+    }
+    STOP_WORDS = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都"}
+    def get_negative_words(industry=None):
+        return NEGATIVE_WORDS
+
+CSV_HEADERS = [
+    "標題", "連結", "發布日期", "看板",
+    "愛心數", "回覆數", "互動指數", "內文", "每篇關鍵字",
+    "熱門留言(20則)", "搜尋關鍵字", "爬取日期"
+]
+
+SEARCH_BASE = "https://www.dcard.tw/search"
+TOP_COMMENTS_COUNT = 20
+
+def get_retry_delay(attempt: int, base_delay: float = RETRY_BASE_DELAY) -> float:
+    delay = base_delay * (2 ** attempt)
+    jitter = random.uniform(0, 1)
+    return delay + jitter
+
+def get_random_user_agent() -> str:
+    return random.choice(USER_AGENTS)
+
+def random_human_delay(min_sec: float = 0.5, max_sec: float = 1.5) -> float:
+    return random.uniform(min_sec, max_sec)
+
+def _parse_article_date(date_str):
+    if not date_str or not isinstance(date_str, str):
+        return None
+    date_str = date_str.strip()
+    now = datetime.now()
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})", date_str)
+    if m:
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except (ValueError, IndexError):
+            return None
+    for pat, mult in [
+        (r"(\d+)\s*天", 1),
+        (r"(\d+)\s*週", 7),
+        (r"(\d+)\s*個?月", 30),
+        (r"(\d+)\s*年", 365)
+    ]:
+        match = re.search(pat, date_str)
+        if match:
+            return now - timedelta(days=int(match.group(1)) * mult)
+    return now
+
+def _in_time_range(date_str, max_days):
+    if max_days >= 99999:
+        return True
+    dt = _parse_article_date(date_str)
+    if dt is None:
+        return True
+    return (datetime.now() - dt).days <= max_days
+
+def _choose_time_range():
+    _safe_print("\n請選擇搜尋時間範圍：")
+    _safe_print("  1. 1 個月")
+    _safe_print("  2. 半年 (6 個月)")
+    _safe_print("  3. 1 年")
+    _safe_print("  4. 全部")
+    choice = input("請輸入 1~4 (預設 2)：").strip() or "2"
+    map_days = {"1": 30, "2": 180, "3": 365, "4": 99999}
+    return map_days.get(choice, 180)
+
+def _expand_keywords_builtin(keyword):
+    expand_map = {
+        "把妹": ["把妹", "約會", "戀愛", "搭訕", "追求", "脫單"],
+        "約會": ["約會", "戀愛", "交友", "搭訕", "把妹"],
+        "課程": ["課程", "教學", "培訓", "訓練"],
+        "PUA": ["PUA", "話術", "套路", "撩"],
+    }
+    base = keyword.strip()
+    expanded = {base}
+    for k, synonyms in expand_map.items():
+        if k in base:
+            expanded.update(synonyms)
+    return list(expanded)
+
+def _expand_keywords_gemini(keyword, api_key=None):
+    try:
+        from google import genai
+        client = genai.Client(api_key=api_key) if api_key and str(api_key).isascii() else genai.Client()
+        prompt = f"""請針對「{keyword}」這個關鍵字，列出 5~8 個鄉民常用、意義相近或相關的搜尋詞。
+只輸出關鍵字，以逗號分隔，不要編號、不要說明。例如：把妹課程, 約會教學, 脫單技巧"""
+        resp = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
+        text = resp.text.strip() if resp and resp.text else ""
+        if not text:
+            return _expand_keywords_builtin(keyword)
+        words = [w.strip() for w in re.split(r"[,，、\s]+", text) if w.strip()]
+        return list({keyword.strip()}.union(words[:8])) if words else _expand_keywords_builtin(keyword)
+    except Exception as e:
+        _safe_print(f"[*] Gemini 擴充失敗，改用內建發散：{e}")
+        return _expand_keywords_builtin(keyword)
+
+def _extract_article_keywords(title, content, top_n=5):
+    full = f"{title or ''} {content or ''}"
+    if jieba is not None:
+        words = [w for w in jieba.lcut(full) if len(w) > 1 and w not in STOP_WORDS]
+    else:
+        words = [w for w in re.findall(r"[\u4e00-\u9fff\w]+", full) if len(w) > 1 and w not in STOP_WORDS]
+    from collections import Counter
+    return [w for w, _ in Counter(words).most_common(top_n)]
+
+def _analyze_sentiment_categories(full_text):
+    result = []
+    for cat, data in SENTIMENT_CATEGORIES.items():
+        found = [kw for kw in data["keywords"] if kw in full_text]
+        if found:
+            result.append({
+                "category": cat,
+                "keywords": found,
+                "polarity": data["polarity"]
+            })
+    return result
+
+EXTRACT_CARD_JS = """
+el => {
+    const card = el.closest('article') || el.closest('a')?.parentElement?.parentElement;
+    if (!card) return null;
+    const timeEl = card.querySelector('time');
+    const date = timeEl ? (timeEl.getAttribute('datetime') || timeEl.textContent) : '';
+    const h = card.querySelector('h2, h3');
+    const title = h ? h.textContent.trim() : '';
+    let likes = 0, comments = 0;
+    const txt = card.innerText || '';
+    const likeMatch = txt.match(/心情\\s*(\\d+)/) || txt.match(/(\\d+)\\s*個?愛心/);
+    if (likeMatch) likes = parseInt(likeMatch[1]);
+    const cmtMatch = txt.match(/留言\\s*(\\d+)/) || txt.match(/(\\d+)\\s*則回應/);
+    if (cmtMatch) comments = parseInt(cmtMatch[1]);
+    if (likes === 0 && comments === 0) {
+        const nums = (txt.match(/\\b\\d+\\b/g) || []).map(Number);
+        if (nums.length >= 2) { comments = nums.pop(); likes = nums.pop(); }
+        else if (nums.length === 1) { likes = nums.pop(); }
+    }
+    return { title, date, likes, comments };
+}
+"""
+
+EXTRACT_ARTICLE_JS = """
+() => {
+    let content = '';
+    const article = document.querySelector('article') || document.querySelector('[class*="PostContent"]');
+    if (article) content = (article.innerText || '').trim();
+    let comments = [];
+    document.querySelectorAll('div[data-key^="comment"], div[role="row"]').forEach(el => {
+        const txt = (el.innerText || '').trim();
+        if (txt.length > 2 && txt.length < 1500 && !content.includes(txt.substring(0, 30)))
+            comments.push(txt.replace(/\\n/g, ' '));
+    });
+    if (comments.length === 0) {
+        let articlePassed = false;
+        document.querySelectorAll('div, p').forEach(el => {
+            if (article && article.contains(el)) { articlePassed = true; return; }
+            if (articlePassed) {
+                const txt = (el.innerText || '').trim();
+                if (txt.length > 3 && txt.length < 500) comments.push(txt.replace(/\\n/g, ' '));
+            }
+        });
+    }
+    comments = [...new Set(comments)].filter(c => c);
+    return { content, comments: comments.slice(0, 25) };
+}
+"""
+
+def _fetch_article_retry(page, url, max_retries=RETRY_MAX):
+    for attempt in range(max_retries + 1):
+        try:
+            page.set_default_timeout(25000)
+            page.goto(url, wait_until="load")
+            time.sleep(random.uniform(2.0, 3.0))
+            age_btn = page.query_selector('button:has-text("我已滿 18 歲")')
+            if age_btn:
+                age_btn.click()
+                time.sleep(1.5)
+            page.wait_for_selector("article", state="visible", timeout=12000)
+            for _ in range(8):
+                scroll_distance = random.randint(400, 1500)
+                page.evaluate(f"window.scrollBy(0, {scroll_distance})")
+                time.sleep(random.uniform(0.8, 2.0))
+            result = page.evaluate(EXTRACT_ARTICLE_JS)
+            content = (result.get("content") or "").strip()
+            comments = result.get("comments") or []
+            return content, comments[:TOP_COMMENTS_COUNT]
+        except Exception as e:
+            if attempt < max_retries:
+                delay = get_retry_delay(attempt)
+                _safe_print(f"      [!] 內文抓取失敗，{delay:.1f}秒後重試 ({attempt+1}/{max_retries})...")
+                time.sleep(delay)
+            else:
+                _safe_print(f"      [!] 頁面讀取失敗，略過：{str(e)[:50]}")
+                return "", []
+    return "", []
+
+
+def scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days=99999, max_retries=RETRY_MAX):
+    total_added = 0
+    fail_count = 0   # ✅ 修改5：加入失敗計數
+
+    for kw in keywords:
+        url = f"{SEARCH_BASE}?query={quote(kw)}"
+        _safe_print(f"\n[*] 搜尋關鍵字：{kw}")
+
+        # ✅ 修改3：修掉 try/except 孤立 bug，整個關鍵字搜尋包在同一個 try 裡
+        try:
+            search_loaded = False
+            for attempt in range(max_retries + 1):
+                try:
+                    page.goto(url, wait_until="load", timeout=30000)
+                    time.sleep(random.uniform(4.0, 6.0))
+                    try:
+                        page.wait_for_selector('a[href*="/f/"][href*="/p/"]', timeout=15000)
+                        search_loaded = True
+                        break
+                    except Exception:
+                        _safe_print(f"    [!] {kw} 搜尋頁未載入文章，重試中... ({attempt+1}/{max_retries})")
+                        if attempt < max_retries:
+                            delay = get_retry_delay(attempt, base_delay=3.0)
+                            time.sleep(delay)
+                        continue
+                except Exception as e:
+                    if attempt < max_retries:
+                        delay = get_retry_delay(attempt, base_delay=3.0)
+                        _safe_print(f"    [!] 頁面載入失敗，{delay:.1f}秒後重試 ({attempt+1}/{max_retries})...")
+                        time.sleep(delay)
+                    else:
+                        _safe_print(f"    [!] {kw} 搜尋頁載入多次失敗，略過")
+
+            if not search_loaded:
+                fail_count += 1
+                continue
+
+            # ✅ 修改4：把「已收集過的 href」獨立出來，避免重複抓文章
+            # 原本邏輯：每輪滾動都重新掃全部 links，導致同一篇文章被重複處理
+            # 修正後：只處理「這一輪新出現」的文章
+            prev_count = 0
+            no_new_rounds = 0
+
+            for scroll_round in range(35):
+                steps = random.randint(4, 8)
+                for _ in range(steps):
+                    scroll_px = random.randint(300, 700)
+                    page.evaluate(f"window.scrollBy(0, {scroll_px})")
+                    time.sleep(random.uniform(0.3, 0.8))
+                time.sleep(random.uniform(1.5, 3.0))
+
+                current_count = len(page.locator('a[href*="/f/"][href*="/p/"]').all())
+                if current_count == prev_count:
+                    no_new_rounds += 1
+                    if no_new_rounds >= 4:
+                        _safe_print(f"    [*] 已到底部，共載入 {current_count} 篇卡片")
+                        break
+                else:
+                    no_new_rounds = 0
+                    _safe_print(f"    載入中... 目前 {current_count} 篇")
+                prev_count = current_count
+
+            # ✅ 修改4 續：滾動完成後，統一處理所有文章（不在滾動迴圈內處理）
+            links = page.locator('a[href*="/f/"][href*="/p/"]').all()
+            new_items = []
+            for link_el in links:
+                href = link_el.get_attribute("href")
+                if not href:
+                    continue
+                if not href.startswith("http"):
+                    href = "https://www.dcard.tw" + href
+                if href in seen_hrefs:
+                    continue
+                card_info = link_el.evaluate(EXTRACT_CARD_JS)
+                if not card_info:
+                    continue
+                if not _in_time_range(card_info.get("date", ""), time_range_days):
+                    continue
+                seen_hrefs.add(href)
+                new_items.append((href, card_info, card_info.get("title", "（無標題）")))
+
+            _safe_print(f"    [*] 關鍵字「{kw}」找到 {len(new_items)} 篇新文章")
+
+            for i, (fetch_url, card_info, title) in enumerate(new_items):
+                _safe_print(f"  [{i+1}/{len(new_items)}] {title[:30]}...")
+
+                if SKIP_CONTENT:
+                    content, comments = "", []
+                else:
+                    content, comments = _fetch_article_retry(page, fetch_url)
+
+                article_keywords = _extract_article_keywords(title, content)
+                top3_str = " | ".join(str(c) for c in comments[:TOP_COMMENTS_COUNT])
+
+                all_results.append({
+                    "title": title,
+                    "link": fetch_url,
+                    "date": card_info.get("date", ""),
+                    "forum": (re.search(r"/f/([^/]+)/p/", fetch_url) or [None, "unknown"])[1],
+                    "likes": int(card_info.get("likes") or 0),
+                    "comments": int(card_info.get("comments") or 0),
+                    "engagement": int(card_info.get("likes") or 0) + int(card_info.get("comments") or 0),
+                    "content": content,
+                    "article_keywords": ", ".join(article_keywords),
+                    "top_comments": top3_str,
+                    "keyword": kw,
+                    "scrape_date": datetime.now().strftime("%Y-%m-%d"),
+                })
+                total_added += 1
+
+                if not SKIP_CONTENT:
+                    try:
+                        from config import Config
+                        dmin = getattr(Config, "DCARD_DELAY_MIN", 4.0)
+                        dmax = getattr(Config, "DCARD_DELAY_MAX", 6.0)
+                    except ImportError:
+                        dmin, dmax = 4.0, 6.0
+                    time.sleep(random.uniform(dmin, dmax))
+
+        except Exception as e:
+            fail_count += 1
+            logger.exception("搜尋 %s 發生錯誤: %s", kw, str(e))
+            _safe_print(f"    [!] 關鍵字「{kw}」發生錯誤：{str(e)[:80]}")
+
+    # ✅ 修改5：清楚的完成回報
+    _safe_print("\n" + "=" * 55)
+    _safe_print(f"  ✅ Dcard 爬取完成")
+    _safe_print(f"  搜尋關鍵字數：{len(keywords)} 個")
+    _safe_print(f"  成功關鍵字數：{len(keywords) - fail_count} 個")
+    _safe_print(f"  失敗關鍵字數：{fail_count} 個")
+    _safe_print(f"  總收集文章數：{total_added} 篇")
+    _safe_print("=" * 55)
+
+    return total_added
+
+
+def run_analysis_and_report(all_results, keyword, output_dir=None, industry=None):
+    if not all_results:
+        return
+
+    total = len(all_results)
+    full_text = " ".join(
+        (r.get("title") or "") + (r.get("content") or "") + (r.get("top_comments") or "")
+        for r in all_results
+    )
+    neg_words = get_negative_words(industry) if industry else NEGATIVE_WORDS
+    text_fn = lambda r: (r.get("title") or "") + (r.get("content") or "") + (r.get("top_comments") or "")
+    neg_count = sum(1 for r in all_results if any(nw in text_fn(r) for nw in neg_words))
+    anger_idx = (neg_count / total) * 100 if total else 0
+
+    sentiment_result = _analyze_sentiment_categories(full_text)
+
+    from collections import Counter
+    if jieba is not None:
+        words = [w for w in jieba.lcut(full_text) if len(w) > 1 and w not in STOP_WORDS]
+    else:
+        words = [w for w in re.findall(r"[\u4e00-\u9fff\w]+", full_text) if len(w) > 1 and w not in STOP_WORDS]
+    top_kw = Counter(words).most_common(10)
+
+    _safe_print("\n" + "=" * 55)
+    _safe_print("  輿情戰報（參考高頻詞彙與情感極性）")
+    _safe_print("=" * 55)
+    _safe_print(f"  搜尋關鍵字：{keyword}")
+    _safe_print(f"  分析文章數：{total} 篇")
+    _safe_print(f"  市場憤怒指數：{anger_idx:.1f}%")
+    _safe_print("")
+    _safe_print("  【高頻詞彙分布與情感極性】")
+    for item in sentiment_result:
+        _safe_print(f"  ► {item['category']}：{', '.join(item['keywords'])}")
+        _safe_print(f"    情感極性：{item['polarity']}")
+    if not sentiment_result:
+        _safe_print("  （無符合四維度詞彙，以下為整體高頻詞）")
+        _safe_print(f"  熱門關鍵字 Top 10：{[w for w, _ in top_kw]}")
+    _safe_print("=" * 55)
+
+    from output_utils import get_report_output_dir
+    out_dir = output_dir if output_dir is not None else get_report_output_dir("reports")
+    safe_kw = re.sub(r'[\/:*?"<>|]', "_", keyword)[:50]
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    output_file = os.path.join(out_dir, f"dcard_{safe_kw}_{ts}.csv")
+    with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_HEADERS)
+        for r in all_results:
+            writer.writerow([
+                r.get("title", ""),
+                r.get("link", ""),
+                r.get("date", ""),
+                r.get("forum", ""),
+                r.get("likes", 0),
+                r.get("comments", 0),
+                r.get("engagement", 0),
+                r.get("content", ""),
+                r.get("article_keywords", ""),
+                r.get("top_comments", ""),
+                r.get("keyword", ""),
+                r.get("scrape_date", ""),
+            ])
+
+    stats = {
+        "keyword": keyword,
+        "article_count": total,
+        "anger_index": round(anger_idx, 1),
+        "sentiment_categories": sentiment_result,
+        "top_keywords": [w for w, _ in top_kw],
+    }
+    stats_file = os.path.join(out_dir, f"dcard_sentiment_{safe_kw}_{ts}.json")
+    with open(stats_file, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+
+    _safe_print(f"\n[*] 報告已儲存至：{out_dir}")
+    _safe_print(f"[*] CSV：{output_file}")
+    _safe_print(f"[*] JSON：{stats_file}")
+
+
+def run_dcard_scrape(
+    keywords,
+    time_range_days,
+    output_dir=None,
+    keyword_label=None,
+    industry=None,
+    headless=True,
+    browser_launch_timeout=60,
+):
+    import threading
+    from output_utils import get_report_output_dir
+    out_dir = output_dir if output_dir is not None else get_report_output_dir("reports")
+    label = keyword_label or (keywords[0] if keywords else "dcard")
+    result_holder = []
+    exc_holder = []
+
+    def _run():
+        try:
+            with sync_playwright() as p:
+                random_ua = get_random_user_agent()
+                browser = p.chromium.launch(
+                    headless=headless,
+                    timeout=browser_launch_timeout * 1000,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-dev-shm-usage',
+                        '--no-sandbox',
+                    ]
+                )
+                context = browser.new_context(
+                    user_agent=random_ua,
+                    viewport={"width": random.choice([1366, 1440, 1920]), "height": random.choice([768, 900, 1080])},
+                    locale="zh-TW",
+                    timezone_id="Asia/Taipei",
+                    permissions=["geolocation"],
+                    extra_http_headers={
+                        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Referer": "https://www.dcard.tw/",
+                    }
+                )
+                page = context.new_page()
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    Object.defineProperty(navigator, 'languages', {
+                        get: () => ['zh-TW', 'zh', 'en']
+                    });
+                """)
+
+                all_results = []
+                seen_hrefs = set()
+                try:
+                    scrape_dcard_search(page, keywords, all_results, seen_hrefs, time_range_days, max_retries=RETRY_MAX)
+                    if all_results:
+                        run_analysis_and_report(all_results, label, output_dir=out_dir, industry=industry)
+                    else:
+                        _safe_print("\n[!] Dcard 未取得任何文章。")
+                    result_holder.append((all_results, out_dir))
+                finally:
+                    browser.close()
+        except Exception as e:
+            exc_holder.append(e)
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+
+    # ✅ 修改2：Thread timeout 改為動態計算
+    # 原本固定 65 秒，但整個爬蟲可能跑 10-30 分鐘
+    # 公式：每個關鍵字預估 5 分鐘 + 啟動時間 60 秒緩衝
+    estimated_seconds = len(keywords) * 5 * 60 + browser_launch_timeout + 60
+    _safe_print(f"[*] 預估執行時間：約 {estimated_seconds // 60} 分鐘")
+    th.join(timeout=estimated_seconds)
+
+    if exc_holder:
+        raise exc_holder[0]
+    if not result_holder:
+        if th.is_alive():
+            raise TimeoutError(f"Dcard 爬蟲執行逾時（超過 {estimated_seconds // 60} 分鐘）")
+        raise RuntimeError("Dcard 爬蟲未回傳結果")
+    return result_holder[0]
+
+
+def main():
+    _safe_print("\n" + "═" * 65)
+    _safe_print("║" + " " * 20 + "📊 Dcard 輿情分析系統" + " " * 20 + "║")
+    _safe_print("║" + " " * 15 + "Real-time Social Listening Platform" + " " * 15 + "║")
+    _safe_print("═" * 65)
+    _safe_print("\n📡 系統初始化中...")
+    time.sleep(0.5)
+    _safe_print("✅ Playwright 瀏覽器引擎就緒")
+    time.sleep(0.5)
+    _safe_print("🎯 載入情緒分析模型")
+    time.sleep(0.5)
+    _safe_print("\n" + "─" * 65)
+
+    time_range_days = _choose_time_range()
+
+    kw = input("\n請輸入搜尋關鍵字：").strip()
+    if not kw:
+        return
+
+    expand = input("是否使用 Gemini 擴充關鍵字？(y/n，預設 n)：").strip().lower() == "y"
+    if expand:
+        try:
+            from main_controller import api_key as gemini_key
+            keywords = _expand_keywords_gemini(kw, gemini_key)
+        except ImportError:
+            try:
+                keywords = _expand_keywords_gemini(kw)
+            except Exception:
+                keywords = _expand_keywords_builtin(kw)
+        _safe_print(f"[*] 擴充後關鍵字：{keywords}")
+    else:
+        keywords = _expand_keywords_builtin(kw)
+        if len(keywords) > 1:
+            _safe_print(f"[*] 內建發散關鍵字：{keywords}")
+
+    run_dcard_scrape(keywords, time_range_days, output_dir=None, keyword_label=kw)
+    _safe_print("\n[*] 任務結束。")
+
+
+if __name__ == "__main__":
+    if sys.platform == "win32":
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+    main()
