@@ -3,8 +3,12 @@ import requests
 import urllib.parse
 import openpyxl
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from youtube_fetcher import fetch_youtube_data
+
+load_dotenv()
 
 # ══════════════════════════════════════════════════════════
 # 品牌清單（每次新專案只需要改這裡）
@@ -111,7 +115,7 @@ def make_ad_library_url(brand):
 
 
 # ── 步驟 3：產生 Excel ────────────────────────────────────
-def build_excel(brands, logo_paths):
+def build_excel(brands, logo_paths, yt_data):
     wb = openpyxl.Workbook()
     thin = Side(style='thin', color="CCCCCC")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
@@ -233,6 +237,7 @@ def build_excel(brands, logo_paths):
     for row in range(3, 3 + len(brands)):
         brand = brands[row - 3]
         row_fill = fill("F5F5F5") if row % 2 == 0 else fill("FFFFFF")
+        yt = yt_data.get(brand["name"], {})
 
         for col_idx in range(1, len(columns)+1):
             cell = ws2.cell(row=row, column=col_idx)
@@ -258,13 +263,28 @@ def build_excel(brands, logo_paths):
             elif col_idx == 16:
                 cell.value = f"=IFERROR((N{row}+O{row})/J{row},\"–\")"
                 cell.alignment = center; cell.number_format = '0.00%'
+            elif col_idx == 17:
+                cell.value = yt.get("subscribers")
+                cell.alignment = center; cell.number_format = '#,##0'
+            elif col_idx == 18:
+                cell.value = yt.get("recent_avg_views")
+                cell.alignment = center; cell.number_format = '#,##0'
+            elif col_idx == 19:
+                cell.value = yt.get("recent_avg_likes")
+                cell.alignment = center; cell.number_format = '#,##0'
             elif col_idx == 20:
-                cell.value = f"=IFERROR(S{row}/R{row},\"–\")"
+                cell.value = yt.get("recent_engagement_rate")
                 cell.alignment = center; cell.number_format = '0.00%'
+            elif col_idx == 21:
+                cell.value = yt.get("top_avg_views")
+                cell.alignment = center; cell.number_format = '#,##0'
+            elif col_idx == 22:
+                cell.value = yt.get("top_avg_likes")
+                cell.alignment = center; cell.number_format = '#,##0'
             elif col_idx == 23:
-                cell.value = f"=IFERROR(V{row}/U{row},\"–\")"
+                cell.value = yt.get("top_engagement_rate")
                 cell.alignment = center; cell.number_format = '0.00%'
-            elif col_idx in [3,4,5,7,8,10,11,12,14,15,17,18,19,21,22]:
+            elif col_idx in [3,4,5,7,8,10,11,12,14,15]:
                 cell.alignment = center; cell.number_format = '#,##0'
             else:
                 cell.alignment = center
@@ -287,8 +307,15 @@ if __name__ == "__main__":
         if path:
             logo_paths[brand["name"]] = path
 
-    print("\n【步驟 2】產生 Excel 工作包...")
-    build_excel(BRANDS, logo_paths)
+    print("\n【步驟 2】抓取 YouTube 數據...")
+    yt_data = {}
+    for brand in BRANDS:
+        result = fetch_youtube_data(brand["name"])
+        if result:
+            yt_data[brand["name"]] = result
+
+    print("\n【步驟 3】產生 Excel 工作包...")
+    build_excel(BRANDS, logo_paths, yt_data)
 
     print("\n=== 完成 ===")
     print("產出物：")
